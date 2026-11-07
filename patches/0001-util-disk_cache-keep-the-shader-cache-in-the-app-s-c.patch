@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 13:44:54 -0400
+Subject: [PATCH 1/3] util/disk_cache: keep the shader cache in the app's cache
+ dir on Android
+
+On Android the on-disk shader cache is disabled by default, and even when
+enabled it has no location: apps get neither HOME nor XDG_CACHE_HOME, and
+the passwd home directory is not writable. The reasoning in the comment
+(EGL_ANDROID_blob_cache manages caching) only holds for GL. A Vulkan app
+that does not persist its own VkPipelineCache therefore recompiles every
+pipeline in every session.
+
+That is the case for the shadPS4-based Android ports (e.g. the Uncharted
+collection): vk_pipeline_cache.cpp creates an empty VkPipelineCache on
+every launch and never saves it, so each new area hitches on ir3
+compiles again every time the game is started.
+
+When the process is an app whose /data/user/<user>/<package>/cache exists
+and is writable, use it as the default location and enable the cache by
+default. MESA_SHADER_CACHE_DIR and MESA_SHADER_CACHE_DISABLE keep their
+meaning, and the cache goes away with Android's "Clear cache".
+---
+ src/util/disk_cache_os.c | 79 +++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
+index 15b6a819b68..aab6f38b3cb 100644
+--- a/src/util/disk_cache_os.c
++++ b/src/util/disk_cache_os.c
+@@ -207,6 +207,55 @@ concatenate_and_mkdir(void *ctx, const char *path, const char *name,
+    return NULL;
+ }
+ 
++#if DETECT_OS_ANDROID
++#include <ctype.h>
++
++/* The calling app's own cache directory, /data/user/<user>/<package>/cache
++ * (what Context.getCacheDir() returns), or NULL when this process is not an
++ * app or the directory is not writable. Android sets neither HOME nor
++ * XDG_CACHE_HOME for apps, so without this the shader cache has no usable
++ * location. The returned string is allocated on mem_ctx (ralloc).
++ */
++static char *
++android_app_cache_dir(void *mem_ctx)
++{
++   char name[256];
++   int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
++   if (fd < 0)
++      return NULL;
++   ssize_t len = read(fd, name, sizeof(name) - 1);
++   close(fd);
++   if (len <= 0)
++      return NULL;
++   name[len] = '\0';
++
++   /* A ":service" process suffix: the data directory is the package's. */
++   char *colon = strchr(name, ':');
++   if (colon)
++      *colon = '\0';
++
++   /* Package names are dotted [A-Za-z0-9_] identifiers; anything else (a
++    * binary path, an empty name) is not an app process.
++    */
++   if (!strchr(name, '.'))
++      return NULL;
++   for (const char *c = name; *c; c++) {
++      if (!isalnum((unsigned char)*c) && *c != '_' && *c != '.')
++         return NULL;
++   }
++
++   char *dir = ralloc_asprintf(mem_ctx, "/data/user/%u/%s/cache",
++                               (unsigned)(getuid() / 100000), name);
++   struct stat st;
++   if (!dir || stat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
++       access(dir, W_OK | X_OK) != 0) {
++      ralloc_free(dir);
++      return NULL;
++   }
++   return dir;
++}
++#endif
++
+ struct lru_file {
+    struct list_head node;
+    char *lru_name;
+@@ -1014,6 +1063,19 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
+       }
+    }
+ 
++#if DETECT_OS_ANDROID
++   if (!path) {
++      char *app_cache = android_app_cache_dir(mem_ctx);
++
++      if (app_cache) {
++         path = concatenate_and_mkdir(mem_ctx, app_cache, cache_dir_name,
++                                      mkdir);
++         if (!path)
++            return NULL;
++      }
++   }
++#endif
++
+    if (!path) {
+       const char *home = os_get_option("HOME");
+ 
+@@ -1091,8 +1153,23 @@ disk_cache_enabled()
+     * Don't forget to also set the shader cache path to something readable
+     * and writable by the application via `mesa.shader.cache.dir`.
+     */
+-#if defined(SHADER_CACHE_DISABLE_BY_DEFAULT) || DETECT_OS_ANDROID
++#if defined(SHADER_CACHE_DISABLE_BY_DEFAULT)
+    bool disable_by_default = true;
++#elif DETECT_OS_ANDROID
++   /* Vulkan has no counterpart of EGL_ANDROID_blob_cache, and apps that
++    * never save a VkPipelineCache (shadPS4-based ports, for example) would
++    * recompile every pipeline in every session. When the process is an app
++    * with its own cache directory, keep the cache there by default; it is
++    * removed with the app's cache and MESA_SHADER_CACHE_DISABLE still wins.
++    */
++   bool disable_by_default = true;
++   if (os_get_option_secure("MESA_SHADER_CACHE_DIR")) {
++      disable_by_default = false;
++   } else {
++      char *app_cache = android_app_cache_dir(NULL);
++      disable_by_default = app_cache == NULL;
++      ralloc_free(app_cache);
++   }
+ #else
+    bool disable_by_default = false;
+ #endif
+-- 
+2.43.0
+

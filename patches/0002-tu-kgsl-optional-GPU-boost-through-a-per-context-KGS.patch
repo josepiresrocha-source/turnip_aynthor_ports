@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 13:45:34 -0400
+Subject: [PATCH 2/3] tu/kgsl: optional GPU boost through a per-context KGSL
+ power constraint
+
+KGSL lets a context ask for a power level: with KGSL_CONTEXT_PWR_CONSTRAINT
+set on the context and KGSL_PROP_PWR_CONSTRAINT/KGSL_CONSTRAINT_PWRLEVEL
+(PWR_MAX) set on it, adreno_drawobj_set_constraint() raises the GPU to its
+highest level on every submission, including the gen7 hwsched path used by
+A7xx (adreno_gen7_hwsched_hfi.c). kgsl_pwrctrl drops the constraint when the
+owning timestamp retires and _adjust_pwrlevel() keeps it within thermal
+limits, so this is not a device-wide policy change: it lasts while the app
+keeps the GPU busy.
+
+On handhelds with active cooling running console ports, the default DCVS
+ramp-up after load spikes shows up as hitches. Add tu_kgsl_gpu_boost
+(driconf, off by default) and TU_KGSL_GPU_BOOST=0/1 to override it. If the
+kernel rejects the property the context keeps normal DCVS.
+---
+ src/freedreno/vulkan/tu_drirc_gen.py |  3 ++
+ src/freedreno/vulkan/tu_knl_kgsl.cc  | 45 +++++++++++++++++++++++++++-
+ 2 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_drirc_gen.py b/src/freedreno/vulkan/tu_drirc_gen.py
+index b46cc2f06fe..a921cdb28fa 100644
+--- a/src/freedreno/vulkan/tu_drirc_gen.py
++++ b/src/freedreno/vulkan/tu_drirc_gen.py
+@@ -37,6 +37,9 @@ def declare_options():
+         S("tu_autotune_algorithm",
+           description="Set the preferred autotune algorithm",
+           c_name="autotune_algo"),
++        B("tu_kgsl_gpu_boost", False,
++          "KGSL only: ask the kernel to keep the GPU at its highest power level while the app's contexts have work in flight (per-context power constraint, still bound by thermal limits). Trades power and heat for fewer clock ramp-up hitches",
++          c_name="kgsl_gpu_boost"),
+     ]
+ 
+     misc_options = [
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index 68a684b52bc..1ebcb72aca3 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -50,10 +50,26 @@ safe_ioctl(int fd, unsigned long request, void *arg)
+ static int
+ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ {
++   /* GPU boost: ask KGSL to run the GPU at its highest power level while
++    * this context has work in flight. KGSL applies a context's constraint on
++    * every submission (adreno_drawobj_set_constraint(), also on the gen7
++    * hwsched path used by A7xx) and drops it once the owning timestamp
++    * retires, so it is not a device-wide setting: it lasts while the app
++    * renders and still obeys thermal limits. It removes the DCVS ramp-up
++    * delay that shows up as hitches when the load jumps.
++    *
++    * TU_KGSL_GPU_BOOST=0/1 overrides the tu_kgsl_gpu_boost driconf option.
++    */
++   bool boost = dev->instance->drirc.perf.kgsl_gpu_boost;
++   const char *boost_env = os_get_option("TU_KGSL_GPU_BOOST");
++   if (boost_env)
++      boost = debug_parse_bool_option(boost_env, boost);
++
+    struct kgsl_drawctxt_create req = {
+       .flags = KGSL_CONTEXT_SAVE_GMEM |
+               KGSL_CONTEXT_NO_GMEM_ALLOC |
+-              KGSL_CONTEXT_PREAMBLE,
++              KGSL_CONTEXT_PREAMBLE |
++              (boost ? KGSL_CONTEXT_PWR_CONSTRAINT : 0),
+    };
+ 
+    int ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
+@@ -62,6 +78,33 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ 
+    queue->msm_queue_id = req.drawctxt_id;
+ 
++   if (boost) {
++      struct kgsl_device_constraint_pwrlevel level = {
++         .level = KGSL_CONSTRAINT_PWR_MAX,
++      };
++      struct kgsl_device_constraint constraint = {
++         .type = KGSL_CONSTRAINT_PWRLEVEL,
++         .context_id = req.drawctxt_id,
++         .data = &level,
++         .size = sizeof(level),
++      };
++      struct kgsl_device_getproperty prop = {
++         .type = KGSL_PROP_PWR_CONSTRAINT,
++         .value = &constraint,
++         .sizebytes = sizeof(constraint),
++      };
++
++      /* Best effort: a kernel that refuses it just keeps normal DCVS. */
++      if (safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_SETPROPERTY,
++                     &prop)) {
++         mesa_logw("TU_KGSL_GPU_BOOST: KGSL rejected the power constraint (%s)",
++                   strerror(errno));
++      } else if (TU_DEBUG(STARTUP)) {
++         mesa_logi("TU_KGSL_GPU_BOOST: max power level for context %u",
++                   req.drawctxt_id);
++      }
++   }
++
+    return 0;
+ }
+ 
+-- 
+2.43.0
+

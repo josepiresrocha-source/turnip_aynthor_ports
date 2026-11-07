@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 13:46:12 -0400
+Subject: [PATCH 3/3] tu: driconf profiles for Xenia- and shadPS4-based Android
+ ports
+
+Forza Horizon 2 Recompiled reports applicationName "Xenia" (rexglue's
+Xenia-derived Vulkan backend). The Uncharted collection port, like other
+shadPS4-based ports, reports "shadPS4". Both renderers emulate console
+GPUs: EDRAM ownership transfers and resolves on one side, GCN render
+targets and compute on the other. Their render passes behave neither like
+desktop D3D (prefer_sysmem) nor like tiler-native mobile games.
+
+For both:
+ - tu_autotune_algorithm=profiled: time each render pass in SYSMEM and
+   GMEM on the device and converge per pass.
+ - tu_kgsl_gpu_boost: hold the top GPU power level while the game renders.
+
+For Xenia-based ports also enable tu_emulate_alpha_to_coverage. FH2's
+native renderer documents that hardware A2C on phones turns soft foliage
+alpha into scattered dots, and its pipelines set alphaToCoverageEnable
+statically, so the emulation is free when A2C is off.
+---
+ src/freedreno/vulkan/00-turnip-defaults.conf | 29 ++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/src/freedreno/vulkan/00-turnip-defaults.conf b/src/freedreno/vulkan/00-turnip-defaults.conf
+index da85f99413a..aef87c9c65d 100644
+--- a/src/freedreno/vulkan/00-turnip-defaults.conf
++++ b/src/freedreno/vulkan/00-turnip-defaults.conf
+@@ -156,5 +156,34 @@
+         <application name="Sweet Surrender" application_name_match="Sweet Surrender VR.exe">
+             <option name="tu_autotune_algorithm" value="prefer_gmem" />
+         </application>
++
++        <!--
++            Console ports on Android. Their renderers are console GPU emulators
++            whose render pass patterns match neither desktop D3D (where
++            prefer_sysmem is the known-good choice) nor tiler-native mobile
++            games, so let the autotuner time each render pass in SYSMEM and
++            GMEM and pick per pass. The GPU boost removes DCVS ramp-up hitches
++            on scene changes (see tu_kgsl_gpu_boost).
++        -->
++        <!-- Xbox 360 static recompilations on the Xenia-derived rexglue GPU
++             backend, e.g. Forza Horizon 2 Recompiled (applicationName "Xenia"). -->
++        <application name="Xenia-based ports" application_name_match="^Xenia$">
++            <option name="tu_autotune_algorithm" value="profiled" /> <!-- ports-autotune -->
++            <option name="tu_kgsl_gpu_boost" value="true" />
++            <!--
++                FH2 Recompiled's native renderer can use real alpha to coverage
++                for foliage, fences and crowds under MSAA, and documents that on
++                phones it turns soft alpha into scattered "flour" dots. The
++                pipelines set alphaToCoverageEnable statically, so emulation
++                only costs anything on the draws that use it.
++            -->
++            <option name="tu_emulate_alpha_to_coverage" value="true" />
++        </application>
++        <!-- PS4 ports on the shadPS4 renderer (applicationName "shadPS4"),
++             e.g. Uncharted: The Nathan Drake Collection on Android. -->
++        <application name="shadPS4-based ports" application_name_match="^shadPS4$">
++            <option name="tu_autotune_algorithm" value="profiled" /> <!-- ports-autotune -->
++            <option name="tu_kgsl_gpu_boost" value="true" />
++        </application>
+     </device>
+ </driconf>
+-- 
+2.43.0
+
