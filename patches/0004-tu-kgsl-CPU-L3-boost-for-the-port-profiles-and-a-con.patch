@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 22:01:48 -0400
+Subject: [PATCH 4/4] tu/kgsl: CPU L3 boost for the port profiles, and a
+ concurrent binning hook
+
+Add tu_kgsl_l3_boost (driconf, off by default; TU_KGSL_L3_BOOST=0/1
+overrides it). It sets KGSL_PROP_L3_PWR_CONSTRAINT /
+KGSL_CONSTRAINT_L3_PWRLEVEL to the maximum on the queue's context. KGSL
+applies it on submission through the same adreno_drawobj_set_constraint()
+path as the GPU constraint, including gen7 hwsched, votes the CPU L3
+cache's maximum frequency through qcom_dcvs (GPUs with ADRENO_L3_VOTE,
+which includes A740/gen7_2_0), and clears the vote when the GPU powers
+down. Kernels without L3 voting ignore it.
+
+Console ports on phones are often CPU-bound. FH2 Recompiled documents
+that its emulated renderer is limited by command processing on fast
+phones, and the Uncharted port runs the game's x86-64 code under FEX.
+Emulation and binary translation are sensitive to memory latency, and an
+L3 floor can shorten it. Whether it helps a given title has to be
+measured on the device.
+
+Both boosts share KGSL_CONTEXT_PWR_CONSTRAINT, which the context now gets
+when either is on. Also factor out the env/driconf parsing and the
+constraint ioctl.
+
+Enable the L3 boost in the Xenia and shadPS4 port profiles. List
+tu_allow_concurrent_binning=false there behind a "ports-cb" marker, so a
+build can enable concurrent binning for these apps only.
+---
+ src/freedreno/vulkan/00-turnip-defaults.conf |  10 +-
+ src/freedreno/vulkan/tu_drirc_gen.py         |   3 +
+ src/freedreno/vulkan/tu_knl_kgsl.cc          | 107 ++++++++++++-------
+ 3 files changed, 81 insertions(+), 39 deletions(-)
+
+diff --git a/src/freedreno/vulkan/00-turnip-defaults.conf b/src/freedreno/vulkan/00-turnip-defaults.conf
+index aef87c9c65d..6ebeec1b6a1 100644
+--- a/src/freedreno/vulkan/00-turnip-defaults.conf
++++ b/src/freedreno/vulkan/00-turnip-defaults.conf
+@@ -163,13 +163,19 @@
+             prefer_sysmem is the known-good choice) nor tiler-native mobile
+             games, so let the autotuner time each render pass in SYSMEM and
+             GMEM and pick per pass. The GPU boost removes DCVS ramp-up hitches
+-            on scene changes (see tu_kgsl_gpu_boost).
++            on scene changes (see tu_kgsl_gpu_boost), and the CPU L3 boost
++            helps their CPU-bound emulation threads (see tu_kgsl_l3_boost).
++            Concurrent binning is listed explicitly so builds can turn it on
++            for these apps only (the "ports-cb" marker); it is off by default
++            upstream because it regresses desktop games.
+         -->
+         <!-- Xbox 360 static recompilations on the Xenia-derived rexglue GPU
+              backend, e.g. Forza Horizon 2 Recompiled (applicationName "Xenia"). -->
+         <application name="Xenia-based ports" application_name_match="^Xenia$">
+             <option name="tu_autotune_algorithm" value="profiled" /> <!-- ports-autotune -->
+             <option name="tu_kgsl_gpu_boost" value="true" />
++            <option name="tu_kgsl_l3_boost" value="true" />
++            <option name="tu_allow_concurrent_binning" value="false" /> <!-- ports-cb -->
+             <!--
+                 FH2 Recompiled's native renderer can use real alpha to coverage
+                 for foliage, fences and crowds under MSAA, and documents that on
+@@ -184,6 +190,8 @@
+         <application name="shadPS4-based ports" application_name_match="^shadPS4$">
+             <option name="tu_autotune_algorithm" value="profiled" /> <!-- ports-autotune -->
+             <option name="tu_kgsl_gpu_boost" value="true" />
++            <option name="tu_kgsl_l3_boost" value="true" />
++            <option name="tu_allow_concurrent_binning" value="false" /> <!-- ports-cb -->
+         </application>
+     </device>
+ </driconf>
+diff --git a/src/freedreno/vulkan/tu_drirc_gen.py b/src/freedreno/vulkan/tu_drirc_gen.py
+index a921cdb28fa..34c0bed3146 100644
+--- a/src/freedreno/vulkan/tu_drirc_gen.py
++++ b/src/freedreno/vulkan/tu_drirc_gen.py
+@@ -40,6 +40,9 @@ def declare_options():
+         B("tu_kgsl_gpu_boost", False,
+           "KGSL only: ask the kernel to keep the GPU at its highest power level while the app's contexts have work in flight (per-context power constraint, still bound by thermal limits). Trades power and heat for fewer clock ramp-up hitches",
+           c_name="kgsl_gpu_boost"),
++        B("tu_kgsl_l3_boost", False,
++          "KGSL only: while the app's contexts are submitting, add a KGSL vote for the CPU L3 cache's maximum frequency (GPUs with L3 voting, e.g. A740). Helps CPU-bound renderers at some power cost",
++          c_name="kgsl_l3_boost"),
+     ]
+ 
+     misc_options = [
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index 1ebcb72aca3..20adc12b724 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -47,29 +47,77 @@ safe_ioctl(int fd, unsigned long request, void *arg)
+    return ret;
+ }
+ 
++/* An env var (0/1) overriding a driconf boolean. */
++static bool
++kgsl_bool_option(const char *env, bool drirc_value)
++{
++   const char *value = os_get_option(env);
++   return value ? debug_parse_bool_option(value, drirc_value) : drirc_value;
++}
++
++/* Ask for the top level of a KGSL per-context power constraint. Best effort:
++ * a kernel that refuses it just keeps its normal DCVS behaviour.
++ */
++static void
++kgsl_set_max_constraint(struct tu_device *dev, uint32_t context_id,
++                        uint32_t prop_type, uint32_t constraint_type,
++                        const char *name)
++{
++   struct kgsl_device_constraint_pwrlevel level = {
++      .level = KGSL_CONSTRAINT_PWR_MAX,
++   };
++   struct kgsl_device_constraint constraint = {
++      .type = constraint_type,
++      .context_id = context_id,
++      .data = &level,
++      .size = sizeof(level),
++   };
++   struct kgsl_device_getproperty prop = {
++      .type = prop_type,
++      .value = &constraint,
++      .sizebytes = sizeof(constraint),
++   };
++
++   if (safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_SETPROPERTY,
++                  &prop)) {
++      mesa_logw("%s: KGSL rejected the power constraint (%s)", name,
++                strerror(errno));
++   } else if (TU_DEBUG(STARTUP)) {
++      mesa_logi("%s: max level requested for context %u", name, context_id);
++   }
++}
++
+ static int
+ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ {
+-   /* GPU boost: ask KGSL to run the GPU at its highest power level while
+-    * this context has work in flight. KGSL applies a context's constraint on
+-    * every submission (adreno_drawobj_set_constraint(), also on the gen7
+-    * hwsched path used by A7xx) and drops it once the owning timestamp
+-    * retires, so it is not a device-wide setting: it lasts while the app
+-    * renders and still obeys thermal limits. It removes the DCVS ramp-up
+-    * delay that shows up as hitches when the load jumps.
++   /* KGSL applies a context's power constraints on every submission
++    * (adreno_drawobj_set_constraint(), also on the gen7 hwsched path used by
++    * A7xx), but only for contexts created with KGSL_CONTEXT_PWR_CONSTRAINT.
++    * Neither is a device-wide setting:
+     *
+-    * TU_KGSL_GPU_BOOST=0/1 overrides the tu_kgsl_gpu_boost driconf option.
++    *  - GPU boost holds the GPU at its highest power level until the owning
++    *    timestamp retires, within thermal limits. It removes the DCVS ramp-up
++    *    delay that shows up as hitches when the load jumps.
++    *    TU_KGSL_GPU_BOOST=0/1 overrides tu_kgsl_gpu_boost.
++    *
++    *  - CPU L3 boost adds a KGSL vote for the CPU L3 cache's maximum
++    *    frequency (only on GPUs with ADRENO_L3_VOTE, A740 among them). The
++    *    vote is a floor next to the CPU's own memory-latency governor and is
++    *    dropped when the GPU powers down. It helps CPU-bound renderers, such
++    *    as console GPU emulation and x86 translation, whose threads spend
++    *    much of their time waiting on memory.
++    *    TU_KGSL_L3_BOOST=0/1 overrides tu_kgsl_l3_boost.
+     */
+-   bool boost = dev->instance->drirc.perf.kgsl_gpu_boost;
+-   const char *boost_env = os_get_option("TU_KGSL_GPU_BOOST");
+-   if (boost_env)
+-      boost = debug_parse_bool_option(boost_env, boost);
++   bool gpu_boost = kgsl_bool_option("TU_KGSL_GPU_BOOST",
++                                     dev->instance->drirc.perf.kgsl_gpu_boost);
++   bool l3_boost = kgsl_bool_option("TU_KGSL_L3_BOOST",
++                                    dev->instance->drirc.perf.kgsl_l3_boost);
+ 
+    struct kgsl_drawctxt_create req = {
+       .flags = KGSL_CONTEXT_SAVE_GMEM |
+               KGSL_CONTEXT_NO_GMEM_ALLOC |
+               KGSL_CONTEXT_PREAMBLE |
+-              (boost ? KGSL_CONTEXT_PWR_CONSTRAINT : 0),
++              (gpu_boost || l3_boost ? KGSL_CONTEXT_PWR_CONSTRAINT : 0),
+    };
+ 
+    int ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
+@@ -78,31 +126,14 @@ kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
+ 
+    queue->msm_queue_id = req.drawctxt_id;
+ 
+-   if (boost) {
+-      struct kgsl_device_constraint_pwrlevel level = {
+-         .level = KGSL_CONSTRAINT_PWR_MAX,
+-      };
+-      struct kgsl_device_constraint constraint = {
+-         .type = KGSL_CONSTRAINT_PWRLEVEL,
+-         .context_id = req.drawctxt_id,
+-         .data = &level,
+-         .size = sizeof(level),
+-      };
+-      struct kgsl_device_getproperty prop = {
+-         .type = KGSL_PROP_PWR_CONSTRAINT,
+-         .value = &constraint,
+-         .sizebytes = sizeof(constraint),
+-      };
+-
+-      /* Best effort: a kernel that refuses it just keeps normal DCVS. */
+-      if (safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_SETPROPERTY,
+-                     &prop)) {
+-         mesa_logw("TU_KGSL_GPU_BOOST: KGSL rejected the power constraint (%s)",
+-                   strerror(errno));
+-      } else if (TU_DEBUG(STARTUP)) {
+-         mesa_logi("TU_KGSL_GPU_BOOST: max power level for context %u",
+-                   req.drawctxt_id);
+-      }
++   if (gpu_boost) {
++      kgsl_set_max_constraint(dev, req.drawctxt_id, KGSL_PROP_PWR_CONSTRAINT,
++                              KGSL_CONSTRAINT_PWRLEVEL, "TU_KGSL_GPU_BOOST");
++   }
++   if (l3_boost) {
++      kgsl_set_max_constraint(dev, req.drawctxt_id,
++                              KGSL_PROP_L3_PWR_CONSTRAINT,
++                              KGSL_CONSTRAINT_L3_PWRLEVEL, "TU_KGSL_L3_BOOST");
+    }
+ 
+    return 0;
+-- 
+2.43.0
+
