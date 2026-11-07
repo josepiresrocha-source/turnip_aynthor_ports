@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 6 Nov 2026 13:46:12 -0400
-Subject: [PATCH 3/3] tu: driconf profiles for Xenia- and shadPS4-based Android
+Subject: [PATCH 3/7] tu: driconf profiles for Xenia- and shadPS4-based Android
  ports
 
 Forza Horizon 2 Recompiled reports applicationName "Xenia" (rexglue's

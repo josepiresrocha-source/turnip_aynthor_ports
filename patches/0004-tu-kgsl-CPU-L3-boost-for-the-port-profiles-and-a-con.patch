@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 6 Nov 2026 22:01:48 -0400
-Subject: [PATCH 4/4] tu/kgsl: CPU L3 boost for the port profiles, and a
+Subject: [PATCH 4/7] tu/kgsl: CPU L3 boost for the port profiles, and a
  concurrent binning hook
 
 Add tu_kgsl_l3_boost (driconf, off by default; TU_KGSL_L3_BOOST=0/1

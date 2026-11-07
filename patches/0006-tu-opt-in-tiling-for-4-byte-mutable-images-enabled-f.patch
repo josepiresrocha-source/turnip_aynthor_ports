@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 22:32:19 -0400
+Subject: [PATCH 6/7] tu: opt-in tiling for 4-byte mutable images, enabled for
+ the port profiles
+
+Add tu_assume_unswapped_mutable_views (driconf, off by default). When the
+app gives no format list, 4-byte MUTABLE_FORMAT color images with an
+unswapped format (R8G8B8A8, R10G10B10A2, R11G11B10, R32, R16G16...) stay
+tiled instead of going linear. That is only correct if the app never
+views them with a swapped format (B8G8R8A8, B10G10R10A2); if it does,
+red and blue come out swapped. 2- and 3-byte classes stay linear, because
+they also carry the R8G8/R16 layout difference.
+
+Enable it for the Xenia and shadPS4 port profiles, behind a
+"ports-tiling" marker so a build can leave it off. Both renderers create
+MUTABLE images without format lists and map console formats only to
+unswapped Vulkan formats: shadPS4's liverpool_to_vk.cpp table has no
+swapped 4-byte format, and Xenia's render target and ownership-transfer
+formats are R8G8B8A8, A2B10G10R10, R16G16 and R32 variants. On A740 this
+keeps their RGBA8 G-buffers and HDR R11G11B10 targets tiled.
+---
+ src/freedreno/vulkan/00-turnip-defaults.conf |  7 +++++++
+ src/freedreno/vulkan/tu_drirc_gen.py         |  3 +++
+ src/freedreno/vulkan/tu_image.cc             | 17 +++++++++++++++--
+ 3 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/vulkan/00-turnip-defaults.conf b/src/freedreno/vulkan/00-turnip-defaults.conf
+index 6ebeec1b6a1..43d19a7c4ef 100644
+--- a/src/freedreno/vulkan/00-turnip-defaults.conf
++++ b/src/freedreno/vulkan/00-turnip-defaults.conf
+@@ -168,6 +168,11 @@
+             Concurrent binning is listed explicitly so builds can turn it on
+             for these apps only (the "ports-cb" marker); it is off by default
+             upstream because it regresses desktop games.
++            Both renderers create MUTABLE_FORMAT images without format lists
++            and map console formats only to unswapped Vulkan formats (shadPS4's
++            liverpool_to_vk.cpp table; Xenia's render target and ownership
++            transfer formats), so their 4-byte color images can stay tiled
++            (the "ports-tiling" marker).
+         -->
+         <!-- Xbox 360 static recompilations on the Xenia-derived rexglue GPU
+              backend, e.g. Forza Horizon 2 Recompiled (applicationName "Xenia"). -->
+@@ -176,6 +181,7 @@
+             <option name="tu_kgsl_gpu_boost" value="true" />
+             <option name="tu_kgsl_l3_boost" value="true" />
+             <option name="tu_allow_concurrent_binning" value="false" /> <!-- ports-cb -->
++            <option name="tu_assume_unswapped_mutable_views" value="true" /> <!-- ports-tiling -->
+             <!--
+                 FH2 Recompiled's native renderer can use real alpha to coverage
+                 for foliage, fences and crowds under MSAA, and documents that on
+@@ -192,6 +198,7 @@
+             <option name="tu_kgsl_gpu_boost" value="true" />
+             <option name="tu_kgsl_l3_boost" value="true" />
+             <option name="tu_allow_concurrent_binning" value="false" /> <!-- ports-cb -->
++            <option name="tu_assume_unswapped_mutable_views" value="true" /> <!-- ports-tiling -->
+         </application>
+     </device>
+ </driconf>
+diff --git a/src/freedreno/vulkan/tu_drirc_gen.py b/src/freedreno/vulkan/tu_drirc_gen.py
+index 34c0bed3146..107fd87002b 100644
+--- a/src/freedreno/vulkan/tu_drirc_gen.py
++++ b/src/freedreno/vulkan/tu_drirc_gen.py
+@@ -43,6 +43,9 @@ def declare_options():
+         B("tu_kgsl_l3_boost", False,
+           "KGSL only: while the app's contexts are submitting, add a KGSL vote for the CPU L3 cache's maximum frequency (GPUs with L3 voting, e.g. A740). Helps CPU-bound renderers at some power cost",
+           c_name="kgsl_l3_boost"),
++        B("tu_assume_unswapped_mutable_views", False,
++          "Keep tiling for 4-byte MUTABLE_FORMAT color images that have no format list and an unswapped format, trusting the app never to view them with a swapped format such as B8G8R8A8. Wrong (red/blue swapped) for apps that do",
++          c_name="assume_unswapped_mutable_views"),
+     ]
+ 
+     misc_options = [
+diff --git a/src/freedreno/vulkan/tu_image.cc b/src/freedreno/vulkan/tu_image.cc
+index b0b43933c9f..d04560491b0 100644
+--- a/src/freedreno/vulkan/tu_image.cc
++++ b/src/freedreno/vulkan/tu_image.cc
+@@ -712,8 +712,21 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
+                 * get every compressed texture and 64/128-bit render target
+                 * as linear.
+                 */
+-               fmt_list_has_swaps =
+-                  size_class_has_swaps(util_format_get_blocksize(pformat));
++               unsigned texel_size = util_format_get_blocksize(pformat);
++               fmt_list_has_swaps = size_class_has_swaps(texel_size);
++
++               /* 4-byte classes do contain swapped formats (B8G8R8A8,
++                * B10G10R10A2), so a conforming app could view an R8G8B8A8
++                * image as B8G8R8A8. Apps known never to do that (console
++                * emulators whose format tables have no swapped 4-byte
++                * formats) can opt in to keep these images tiled. 2- and
++                * 3-byte classes stay linear: they also carry the R8G8/R16
++                * layout difference.
++                */
++               if (fmt_list_has_swaps && texel_size == 4 &&
++                   device->instance->drirc.perf.assume_unswapped_mutable_views &&
++                   tu6_format_texture(pformat, TILE6_LINEAR, false).swap == WZYX)
++                  fmt_list_has_swaps = false;
+             }
+ 
+             if (r8g8_r16 || fmt_list_has_swaps) {
+-- 
+2.43.0
+

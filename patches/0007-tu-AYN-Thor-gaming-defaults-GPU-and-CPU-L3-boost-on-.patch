@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 22:32:41 -0400
+Subject: [PATCH 7/7] tu: AYN Thor gaming defaults: GPU and CPU L3 boost on,
+ concurrent binning for ports
+
+This build is only loaded by games and emulators that pick it as their
+Vulkan driver, so turn tu_kgsl_gpu_boost and tu_kgsl_l3_boost on by
+default for every app. TU_KGSL_GPU_BOOST=0 / TU_KGSL_L3_BOOST=0, or the
+driconf options, still turn them off.
+
+Enable concurrent binning for the Xenia and shadPS4 port profiles. On an
+AYN Thor (A740) the Uncharted port gained 2-3 FPS with it and the L3
+boost. It stays off for everything else, as upstream.
+---
+ src/freedreno/vulkan/00-turnip-defaults.conf | 11 ++++++-----
+ src/freedreno/vulkan/tu_drirc_gen.py         |  8 ++++----
+ 2 files changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/src/freedreno/vulkan/00-turnip-defaults.conf b/src/freedreno/vulkan/00-turnip-defaults.conf
+index 43d19a7c4ef..0c1bb15d45c 100644
+--- a/src/freedreno/vulkan/00-turnip-defaults.conf
++++ b/src/freedreno/vulkan/00-turnip-defaults.conf
+@@ -165,9 +165,10 @@
+             GMEM and pick per pass. The GPU boost removes DCVS ramp-up hitches
+             on scene changes (see tu_kgsl_gpu_boost), and the CPU L3 boost
+             helps their CPU-bound emulation threads (see tu_kgsl_l3_boost).
+-            Concurrent binning is listed explicitly so builds can turn it on
+-            for these apps only (the "ports-cb" marker); it is off by default
+-            upstream because it regresses desktop games.
++            Concurrent binning is on for these apps only (the "ports-cb"
++            marker lets a build turn it off); it is off by default upstream
++            because it regresses desktop games, and measured +2-3 FPS in the
++            Uncharted port on an AYN Thor (A740) together with the L3 boost.
+             Both renderers create MUTABLE_FORMAT images without format lists
+             and map console formats only to unswapped Vulkan formats (shadPS4's
+             liverpool_to_vk.cpp table; Xenia's render target and ownership
+@@ -180,7 +181,7 @@
+             <option name="tu_autotune_algorithm" value="profiled" /> <!-- ports-autotune -->
+             <option name="tu_kgsl_gpu_boost" value="true" />
+             <option name="tu_kgsl_l3_boost" value="true" />
+-            <option name="tu_allow_concurrent_binning" value="false" /> <!-- ports-cb -->
++            <option name="tu_allow_concurrent_binning" value="true" /> <!-- ports-cb -->
+             <option name="tu_assume_unswapped_mutable_views" value="true" /> <!-- ports-tiling -->
+             <!--
+                 FH2 Recompiled's native renderer can use real alpha to coverage
+@@ -197,7 +198,7 @@
+             <option name="tu_autotune_algorithm" value="profiled" /> <!-- ports-autotune -->
+             <option name="tu_kgsl_gpu_boost" value="true" />
+             <option name="tu_kgsl_l3_boost" value="true" />
+-            <option name="tu_allow_concurrent_binning" value="false" /> <!-- ports-cb -->
++            <option name="tu_allow_concurrent_binning" value="true" /> <!-- ports-cb -->
+             <option name="tu_assume_unswapped_mutable_views" value="true" /> <!-- ports-tiling -->
+         </application>
+     </device>
+diff --git a/src/freedreno/vulkan/tu_drirc_gen.py b/src/freedreno/vulkan/tu_drirc_gen.py
+index 107fd87002b..3c5bab2e166 100644
+--- a/src/freedreno/vulkan/tu_drirc_gen.py
++++ b/src/freedreno/vulkan/tu_drirc_gen.py
+@@ -37,11 +37,11 @@ def declare_options():
+         S("tu_autotune_algorithm",
+           description="Set the preferred autotune algorithm",
+           c_name="autotune_algo"),
+-        B("tu_kgsl_gpu_boost", False,
+-          "KGSL only: ask the kernel to keep the GPU at its highest power level while the app's contexts have work in flight (per-context power constraint, still bound by thermal limits). Trades power and heat for fewer clock ramp-up hitches",
++        B("tu_kgsl_gpu_boost", True,
++          "KGSL only: ask the kernel to keep the GPU at its highest power level while the app's contexts have work in flight (per-context power constraint, still bound by thermal limits). Trades power and heat for fewer clock ramp-up hitches. On by default in this gaming build",
+           c_name="kgsl_gpu_boost"),
+-        B("tu_kgsl_l3_boost", False,
+-          "KGSL only: while the app's contexts are submitting, add a KGSL vote for the CPU L3 cache's maximum frequency (GPUs with L3 voting, e.g. A740). Helps CPU-bound renderers at some power cost",
++        B("tu_kgsl_l3_boost", True,
++          "KGSL only: while the app's contexts are submitting, add a KGSL vote for the CPU L3 cache's maximum frequency (GPUs with L3 voting, e.g. A740). Helps CPU-bound renderers at some power cost. On by default in this gaming build",
+           c_name="kgsl_l3_boost"),
+         B("tu_assume_unswapped_mutable_views", False,
+           "Keep tiling for 4-byte MUTABLE_FORMAT color images that have no format list and an unswapped format, trusting the app never to view them with a swapped format such as B8G8R8A8. Wrong (red/blue swapped) for apps that do",
+-- 
+2.43.0
+

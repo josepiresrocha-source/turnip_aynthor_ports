@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 22:31:48 -0400
+Subject: [PATCH 5/7] tu: keep tiling for mutable images without a format list
+ when no view can swap
+
+On GPUs without ubwc_all_formats_compatible (a6xx, a7xx gen1/gen2 such as
+A740), a MUTABLE_FORMAT color image without VkImageFormatListCreateInfo is
+forced to TILE6_LINEAR, because format_list_has_swaps() assumes that a
+missing list means "any compatible format, presumably one with a swap",
+and the CCU ignores the swap on tiled surfaces while the TP honours it.
+
+That assumption is only true for some texel sizes. Views of a mutable
+image must have the same texel size, or, for BLOCK_TEXEL_VIEW_COMPATIBLE
+compressed images, be uncompressed formats of the block size; other
+compressed views stay in the same compression class. In the format table,
+swapped color formats only exist at 2, 3 and 4 bytes (B5G6R5, B4G4R4A4,
+B8G8R8, B8G8R8A8, B10G10R10A2, ...). For 1-, 8- and 16-byte texels and for
+every compressed format there is no view that could need the swap, so
+linear buys nothing.
+
+Build that per-size table once from the format table and use it when the
+app gives no format list. Single-plane, non-YUV formats only; images with
+a format list and the r8g8/r16 rule are unchanged.
+
+This matters for apps that create images MUTABLE without format lists.
+shadPS4 (and the Android PS4 ports built on it) does this for every image,
+so on A740 every BC texture and every 64/128-bit render target was
+linear.
+---
+ src/freedreno/vulkan/tu_image.cc | 67 +++++++++++++++++++++++++++++++-
+ 1 file changed, 65 insertions(+), 2 deletions(-)
+
+diff --git a/src/freedreno/vulkan/tu_image.cc b/src/freedreno/vulkan/tu_image.cc
+index 478a63b71d4..b0b43933c9f 100644
+--- a/src/freedreno/vulkan/tu_image.cc
++++ b/src/freedreno/vulkan/tu_image.cc
+@@ -9,6 +9,8 @@
+ 
+ #include "tu_image.h"
+ 
++#include <array>
++
+ #include "drm-uapi/drm_fourcc.h"
+ 
+ #include "util/format/u_format.h"
+@@ -462,6 +464,47 @@ format_list_reinterprets_r8g8_r16(enum pipe_format format, const VkImageFormatLi
+    return has_r8g8 && has_non_r8g8;
+ }
+ 
++/* Whether any color format with a texel (or compressed block) size of `size`
++ * bytes, that can be sampled at all, has a component swap. Built from the
++ * format table: on a6xx/a7xx only the 2-, 3- and 4-byte classes have swapped
++ * formats (B5G6R5, B8G8R8, B8G8R8A8, B10G10R10A2...).
++ */
++static bool
++size_class_has_swaps(unsigned size)
++{
++   static const std::array<bool, 17> has_swaps = [] {
++      std::array<bool, 17> table = {};
++      static const VkFormat ext_formats[] = {
++         VK_FORMAT_A4R4G4B4_UNORM_PACK16,
++         VK_FORMAT_A4B4G4R4_UNORM_PACK16,
++         VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR,
++         VK_FORMAT_A8_UNORM_KHR,
++      };
++      auto check = [&table](VkFormat vk_format) {
++         enum pipe_format format = vk_format_to_pipe_format(vk_format);
++         if (format == PIPE_FORMAT_NONE ||
++             util_format_is_depth_or_stencil(format) ||
++             util_format_is_compressed(format) ||
++             util_format_get_num_planes(format) != 1 ||
++             util_format_is_yuv(format) ||
++             fd6_texture_format(format, TILE6_LINEAR, false) == FMT6_NONE)
++            return;
++         unsigned bytes = util_format_get_blocksize(format);
++         if (bytes < table.size() &&
++             tu6_format_texture(format, TILE6_LINEAR, false).swap != WZYX)
++            table[bytes] = true;
++      };
++      for (int f = VK_FORMAT_R4G4_UNORM_PACK8;
++           f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK; f++)
++         check((VkFormat)f);
++      for (VkFormat f : ext_formats)
++         check(f);
++      return table;
++   }();
++
++   return size >= has_swaps.size() || has_swaps[size];
++}
++
+ static bool
+ format_list_has_swaps(const VkImageFormatListCreateInfo *fmt_list)
+ {
+@@ -650,8 +693,28 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
+                ubwc_enabled = false;
+             }
+ 
+-            bool r8g8_r16 = format_list_reinterprets_r8g8_r16(vk_format_to_pipe_format(image->vk.format), fmt_list);
+-            bool fmt_list_has_swaps = format_list_has_swaps(fmt_list);
++            enum pipe_format pformat = vk_format_to_pipe_format(image->vk.format);
++            bool r8g8_r16 = format_list_reinterprets_r8g8_r16(pformat, fmt_list);
++            bool fmt_list_has_swaps;
++            if ((fmt_list && fmt_list->viewFormatCount) ||
++                vk_format_get_plane_count(image->vk.format) != 1 ||
++                util_format_is_yuv(pformat)) {
++               fmt_list_has_swaps = format_list_has_swaps(fmt_list);
++            } else {
++               /* Without a format list a view may use any format of the same
++                * texel size: an uncompressed format of the block size for
++                * BLOCK_TEXEL_VIEW_COMPATIBLE compressed images, otherwise a
++                * format of the same compression class. Tiling only has to be
++                * given up when that class contains a swapped format, which
++                * is never the case for 1-, 8- and 16-byte texels or for
++                * compressed blocks. Apps that skip VK_KHR_image_format_list
++                * (e.g. shadPS4, which creates every image MUTABLE) otherwise
++                * get every compressed texture and 64/128-bit render target
++                * as linear.
++                */
++               fmt_list_has_swaps =
++                  size_class_has_swaps(util_format_get_blocksize(pformat));
++            }
+ 
+             if (r8g8_r16 || fmt_list_has_swaps) {
+                ubwc_enabled = false;
+-- 
+2.43.0
+
