@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Turnip for the AYN Thor (Snapdragon 8 Gen 2 / Adreno 740, Android 13), tuned for console ports.
 #
-#   Mesa main 21bbed37 (2026-11-06) + patches/ (disk shader cache on Android, KGSL GPU boost,
-#   driconf profiles for Xenia- and shadPS4-based ports).
+#   Mesa main 21bbed37 (2026-11-06) + patches/ (disk shader cache on Android, KGSL GPU and CPU L3
+#   boost, driconf profiles for Xenia- and shadPS4-based ports).
 #
-# Usage:  VARIANT=ports         ./build.sh   (default: autotune "profiled" in the port profiles)
-#         VARIANT=ports-sysmem  ./build.sh   (same, autotune "prefer_sysmem" in the port profiles)
+# Usage:  VARIANT=ports         ./build.sh   (default: v2, autotune "profiled", GPU + L3 boost)
+#         VARIANT=ports-cb      ./build.sh   (v2 + concurrent binning for the ports)
+#         VARIANT=ports-sysmem  ./build.sh   (v2 with autotune "prefer_sysmem" in the port profiles)
 #         VARIANT=upstream      ./build.sh   (Mesa main without patches: the control for A/B tests)
 #
 # All variants use the same compiler flags, so an A/B between them measures only the patches.
@@ -31,8 +32,8 @@ log() { echo -e "\033[0;32m$*\033[0m"; }
 die() { echo -e "\033[0;31m$*\033[0m" >&2; exit 1; }
 
 case "$VARIANT" in
-    ports|ports-sysmem|upstream) ;;
-    *) die "VARIANT must be ports, ports-sysmem or upstream (got '$VARIANT')" ;;
+    ports|ports-cb|ports-sysmem|upstream) ;;
+    *) die "VARIANT must be ports, ports-cb, ports-sysmem or upstream (got '$VARIANT')" ;;
 esac
 
 check_deps() {
@@ -84,14 +85,23 @@ apply_patches() {
     if [ "$VARIANT" = ports-sysmem ]; then
         sed -i 's|value="profiled" /> <!-- ports-autotune -->|value="prefer_sysmem" /> <!-- ports-autotune -->|' "$conf"
     fi
+    if [ "$VARIANT" = ports-cb ]; then
+        sed -i 's|value="false" /> <!-- ports-cb -->|value="true" /> <!-- ports-cb -->|' "$conf"
+    fi
 
     # Guard rails: fail instead of shipping a driver without what its name promises.
     grep -q "android_app_cache_dir" src/util/disk_cache_os.c || die "disk cache patch missing"
     grep -q "KGSL_PROP_PWR_CONSTRAINT" src/freedreno/vulkan/tu_knl_kgsl.cc || die "GPU boost patch missing"
+    grep -q "KGSL_PROP_L3_PWR_CONSTRAINT" src/freedreno/vulkan/tu_knl_kgsl.cc || die "L3 boost patch missing"
+    [ "$(grep -c 'name="tu_kgsl_l3_boost" value="true"' "$conf")" = 2 ] || die "L3 boost not in port profiles"
     local want=profiled
     [ "$VARIANT" = ports-sysmem ] && want=prefer_sysmem
     [ "$(grep -c "value=\"$want\" /> <!-- ports-autotune -->" "$conf")" = 2 ] ||
         die "port profiles do not use autotune '$want'"
+    local cb=false
+    [ "$VARIANT" = ports-cb ] && cb=true
+    [ "$(grep -c "value=\"$cb\" /> <!-- ports-cb -->" "$conf")" = 2 ] ||
+        die "port profiles do not set concurrent binning to '$cb'"
 }
 
 build() {
@@ -145,13 +155,17 @@ package() {
     local name desc suffix
     case "$VARIANT" in
         ports)
-            name="Turnip Thor Ports"
-            desc="A740/Thor: Mesa main 21bbed37 + disk shader cache, GPU boost, port profiles (autotune profiled)"
-            suffix="Ports" ;;
+            name="Turnip Thor Ports v2"
+            desc="A740/Thor v2: Mesa main 21bbed37 + disk shader cache, GPU + CPU L3 boost, port profiles (autotune profiled)"
+            suffix="Ports-v2" ;;
+        ports-cb)
+            name="Turnip Thor Ports v2 CB"
+            desc="A740/Thor v2: same as Ports v2 + concurrent binning for the ports"
+            suffix="Ports-v2-CB" ;;
         ports-sysmem)
-            name="Turnip Thor Ports SYSMEM"
-            desc="A740/Thor: Mesa main 21bbed37 + disk shader cache, GPU boost, port profiles (autotune prefer_sysmem)"
-            suffix="Ports-SYSMEM" ;;
+            name="Turnip Thor Ports v2 SYSMEM"
+            desc="A740/Thor v2: Mesa main 21bbed37 + disk shader cache, GPU + CPU L3 boost, port profiles (autotune prefer_sysmem)"
+            suffix="Ports-v2-SYSMEM" ;;
         upstream)
             name="Turnip Thor Upstream"
             desc="A740/Thor: Mesa main 21bbed37 without patches (control for A/B tests)"
