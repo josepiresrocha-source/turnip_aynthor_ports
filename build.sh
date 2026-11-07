@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Turnip for the AYN Thor (Snapdragon 8 Gen 2 / Adreno 740, Android 13), tuned for console ports.
+# Turnip for the AYN Thor (Snapdragon 8 Gen 2 / Adreno 740, Android 13): a gaming build for games,
+# emulators and console ports.
 #
-#   Mesa main 21bbed37 (2026-11-06) + patches/ (disk shader cache on Android, KGSL GPU and CPU L3
-#   boost, driconf profiles for Xenia- and shadPS4-based ports).
+#   Mesa main 21bbed37 (2026-11-06) + patches/:
+#     - disk shader cache on Android (all apps)
+#     - KGSL GPU and CPU L3 boost (on for all apps)
+#     - tiling for MUTABLE images without a format list when no view can swap (all apps)
+#     - driconf profiles for Xenia- and shadPS4-based ports (autotune profiled, concurrent binning,
+#       A2C emulation for Xenia, opt-in tiling for 4-byte mutable images)
 #
-# Usage:  VARIANT=ports         ./build.sh   (default: v2, autotune "profiled", GPU + L3 boost)
-#         VARIANT=ports-cb      ./build.sh   (v2 + concurrent binning for the ports)
-#         VARIANT=ports-sysmem  ./build.sh   (v2 with autotune "prefer_sysmem" in the port profiles)
+# Usage:  VARIANT=thor          ./build.sh   (default: everything above)
+#         VARIANT=thor-safe     ./build.sh   (same, without the opt-in 4-byte tiling in the port profiles)
+#         VARIANT=thor-nocb     ./build.sh   (same as thor, without concurrent binning in the port profiles)
 #         VARIANT=upstream      ./build.sh   (Mesa main without patches: the control for A/B tests)
 #
 # All variants use the same compiler flags, so an A/B between them measures only the patches.
@@ -18,22 +23,22 @@ WORKDIR="$ROOT/work"
 NDKVER="android-ndk-r29"
 NDK="$WORKDIR/$NDKVER/toolchains/llvm/prebuilt/linux-x86_64/bin"
 MESA_COMMIT="21bbed371887fa750a6ce5ccbedf5354d2411a66"
-VARIANT="${VARIANT:-ports}"
+VARIANT="${VARIANT:-thor}"
 BUILD_VERSION="${BUILD_VERSION:-1}"
 # The Thor ships Android 13. Building against a newer API level can reference libc symbols that
 # Android 13 does not have, and the driver would fail to load.
 API=33
 # Snapdragon 8 Gen 2: Cortex-X3 + A715/A710 + A510, all ARMv9.0. armv8.2-a (a subset every core
 # has) gives inline LSE atomics instead of LL/SC loops; tuned for the A715/A710 cores where the
-# ports' render threads run. Not for older phones.
+# render threads run. Not for older phones.
 CPU_FLAGS="'-march=armv8.2-a+fp16+dotprod+rcpc', '-mtune=cortex-a715'"
 
 log() { echo -e "\033[0;32m$*\033[0m"; }
 die() { echo -e "\033[0;31m$*\033[0m" >&2; exit 1; }
 
 case "$VARIANT" in
-    ports|ports-cb|ports-sysmem|upstream) ;;
-    *) die "VARIANT must be ports, ports-cb, ports-sysmem or upstream (got '$VARIANT')" ;;
+    thor|thor-safe|thor-nocb|upstream) ;;
+    *) die "VARIANT must be thor, thor-safe, thor-nocb or upstream (got '$VARIANT')" ;;
 esac
 
 check_deps() {
@@ -82,26 +87,30 @@ apply_patches() {
     log "Applied $n patches"
 
     local conf=src/freedreno/vulkan/00-turnip-defaults.conf
-    if [ "$VARIANT" = ports-sysmem ]; then
-        sed -i 's|value="profiled" /> <!-- ports-autotune -->|value="prefer_sysmem" /> <!-- ports-autotune -->|' "$conf"
+    if [ "$VARIANT" = thor-safe ]; then
+        sed -i 's|value="true" /> <!-- ports-tiling -->|value="false" /> <!-- ports-tiling -->|' "$conf"
     fi
-    if [ "$VARIANT" = ports-cb ]; then
-        sed -i 's|value="false" /> <!-- ports-cb -->|value="true" /> <!-- ports-cb -->|' "$conf"
+    if [ "$VARIANT" = thor-nocb ]; then
+        sed -i 's|value="true" /> <!-- ports-cb -->|value="false" /> <!-- ports-cb -->|' "$conf"
     fi
 
     # Guard rails: fail instead of shipping a driver without what its name promises.
+    local drirc=src/freedreno/vulkan/tu_drirc_gen.py
     grep -q "android_app_cache_dir" src/util/disk_cache_os.c || die "disk cache patch missing"
     grep -q "KGSL_PROP_PWR_CONSTRAINT" src/freedreno/vulkan/tu_knl_kgsl.cc || die "GPU boost patch missing"
     grep -q "KGSL_PROP_L3_PWR_CONSTRAINT" src/freedreno/vulkan/tu_knl_kgsl.cc || die "L3 boost patch missing"
-    [ "$(grep -c 'name="tu_kgsl_l3_boost" value="true"' "$conf")" = 2 ] || die "L3 boost not in port profiles"
-    local want=profiled
-    [ "$VARIANT" = ports-sysmem ] && want=prefer_sysmem
-    [ "$(grep -c "value=\"$want\" /> <!-- ports-autotune -->" "$conf")" = 2 ] ||
-        die "port profiles do not use autotune '$want'"
-    local cb=false
-    [ "$VARIANT" = ports-cb ] && cb=true
+    grep -q 'B("tu_kgsl_gpu_boost", True' "$drirc" || die "GPU boost is not on by default"
+    grep -q 'B("tu_kgsl_l3_boost", True' "$drirc" || die "L3 boost is not on by default"
+    grep -q "size_class_has_swaps" src/freedreno/vulkan/tu_image.cc || die "mutable tiling patch missing"
+    [ "$(grep -c 'value="profiled" /> <!-- ports-autotune -->' "$conf")" = 2 ] ||
+        die "port profiles do not use autotune 'profiled'"
+    local cb=true tiling=true
+    [ "$VARIANT" = thor-nocb ] && cb=false
+    [ "$VARIANT" = thor-safe ] && tiling=false
     [ "$(grep -c "value=\"$cb\" /> <!-- ports-cb -->" "$conf")" = 2 ] ||
         die "port profiles do not set concurrent binning to '$cb'"
+    [ "$(grep -c "value=\"$tiling\" /> <!-- ports-tiling -->" "$conf")" = 2 ] ||
+        die "port profiles do not set 4-byte mutable tiling to '$tiling'"
 }
 
 build() {
@@ -154,21 +163,21 @@ EOF
 package() {
     local name desc suffix
     case "$VARIANT" in
-        ports)
-            name="Turnip Thor Ports v2"
-            desc="A740/Thor v2: Mesa main 21bbed37 + disk shader cache, GPU + CPU L3 boost, port profiles (autotune profiled)"
-            suffix="Ports-v2" ;;
-        ports-cb)
-            name="Turnip Thor Ports v2 CB"
-            desc="A740/Thor v2: same as Ports v2 + concurrent binning for the ports"
-            suffix="Ports-v2-CB" ;;
-        ports-sysmem)
-            name="Turnip Thor Ports v2 SYSMEM"
-            desc="A740/Thor v2: Mesa main 21bbed37 + disk shader cache, GPU + CPU L3 boost, port profiles (autotune prefer_sysmem)"
-            suffix="Ports-v2-SYSMEM" ;;
+        thor)
+            name="Turnip Thor v3"
+            desc="AYN Thor/A740 v3: Mesa main 21bbed37 + shader cache, GPU+L3 boost, mutable tiling, port profiles"
+            suffix="v3" ;;
+        thor-safe)
+            name="Turnip Thor v3 Safe"
+            desc="AYN Thor/A740 v3 without the opt-in 4-byte mutable tiling in the port profiles"
+            suffix="v3-Safe" ;;
+        thor-nocb)
+            name="Turnip Thor v3 NoCB"
+            desc="AYN Thor/A740 v3 without concurrent binning in the port profiles"
+            suffix="v3-NoCB" ;;
         upstream)
             name="Turnip Thor Upstream"
-            desc="A740/Thor: Mesa main 21bbed37 without patches (control for A/B tests)"
+            desc="AYN Thor/A740: Mesa main 21bbed37 without patches (control for A/B tests)"
             suffix="Upstream" ;;
     esac
 
@@ -178,7 +187,7 @@ package() {
   "schemaVersion": 1,
   "name": "$name",
   "description": "$desc (build $BUILD_VERSION)",
-  "author": "Mesa + Thor ports patches",
+  "author": "Mesa + AYN Thor patches",
   "packageVersion": "$BUILD_VERSION",
   "vendor": "Mesa",
   "driverVersion": "Mesa 26.x main 21bbed37",
