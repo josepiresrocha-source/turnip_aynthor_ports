@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 6 Nov 2026 22:31:48 -0400
-Subject: [PATCH 5/7] tu: keep tiling for mutable images without a format list
+Subject: [PATCH 5/9] tu: keep tiling for mutable images without a format list
  when no view can swap
 
 On GPUs without ubwc_all_formats_compatible (a6xx, a7xx gen1/gen2 such as

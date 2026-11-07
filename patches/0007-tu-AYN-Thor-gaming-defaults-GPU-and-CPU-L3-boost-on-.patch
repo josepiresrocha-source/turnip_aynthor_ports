@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 6 Nov 2026 22:32:41 -0400
-Subject: [PATCH 7/7] tu: AYN Thor gaming defaults: GPU and CPU L3 boost on,
+Subject: [PATCH 7/9] tu: AYN Thor gaming defaults: GPU and CPU L3 boost on,
  concurrent binning for ports
 
 This build is only loaded by games and emulators that pick it as their

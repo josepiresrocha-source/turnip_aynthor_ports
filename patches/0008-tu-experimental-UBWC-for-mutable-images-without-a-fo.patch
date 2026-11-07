@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 00:07:11 -0400
+Subject: [PATCH 8/9] tu: experimental UBWC for mutable images without a format
+ list, env switches
+
+On GPUs whose formats do not share UBWC compatibility (a6xx, a7xx
+gen1/gen2), a MUTABLE_FORMAT color image without a format list always
+loses UBWC. Add tu_mutable_ubwc (driconf, off) to keep it, trusting the
+app to view such images only with formats of the same UBWC class. A view
+of another class reads garbage, so this is an A/B experiment, not a
+default.
+
+Motivation, from the Uncharted port's GPU profile (BB_GPU_PROFILE) on an
+AYN Thor (A740) at 1920x1080: the GPU is ~89% busy. Half of its time goes
+to full-resolution passes into R16G16B16A16_SFLOAT targets (+15% to
+full-screen compute), all of them uncompressed because shadPS4 creates
+every image MUTABLE without a format list.
+
+Also allow both mutable-image options to be overridden from the
+environment (TU_MUTABLE_TILING=0/1, TU_MUTABLE_UBWC=0/1), so they can be
+tested from an app's launcher without rebuilding the driver.
+---
+ src/freedreno/vulkan/tu_device.cc    | 14 ++++++++++++++
+ src/freedreno/vulkan/tu_drirc_gen.py |  3 +++
+ src/freedreno/vulkan/tu_image.cc     | 10 +++++++++-
+ 3 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index 645c3017e4c..bff25e4f5ec 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -1964,6 +1964,20 @@ tu_init_dri_options(struct tu_instance *instance)
+       instance->drirc.perf.allow_concurrent_binning = false;
+    if (TU_DEBUG(FORCE_CONCURRENT_BINNING))
+       instance->drirc.perf.allow_concurrent_binning = true;
++
++   /* 0/1 overrides of the mutable-image layout options, so they can be
++    * A/B-tested from an app's environment without rebuilding the driver.
++    */
++   const char *env = os_get_option("TU_MUTABLE_TILING");
++   if (env) {
++      instance->drirc.perf.assume_unswapped_mutable_views =
++         debug_parse_bool_option(env, instance->drirc.perf.assume_unswapped_mutable_views);
++   }
++   env = os_get_option("TU_MUTABLE_UBWC");
++   if (env) {
++      instance->drirc.perf.mutable_ubwc =
++         debug_parse_bool_option(env, instance->drirc.perf.mutable_ubwc);
++   }
+ }
+ 
+ static uint32_t instance_count = 0;
+diff --git a/src/freedreno/vulkan/tu_drirc_gen.py b/src/freedreno/vulkan/tu_drirc_gen.py
+index 3c5bab2e166..65172c463fa 100644
+--- a/src/freedreno/vulkan/tu_drirc_gen.py
++++ b/src/freedreno/vulkan/tu_drirc_gen.py
+@@ -46,6 +46,9 @@ def declare_options():
+         B("tu_assume_unswapped_mutable_views", False,
+           "Keep tiling for 4-byte MUTABLE_FORMAT color images that have no format list and an unswapped format, trusting the app never to view them with a swapped format such as B8G8R8A8. Wrong (red/blue swapped) for apps that do",
+           c_name="assume_unswapped_mutable_views"),
++        B("tu_mutable_ubwc", False,
++          "Experimental: keep UBWC compression on MUTABLE_FORMAT color images that have no format list, on GPUs where formats do not share UBWC compatibility. Saves bandwidth, but any view with a format of another UBWC class reads garbage",
++          c_name="mutable_ubwc"),
+     ]
+ 
+     misc_options = [
+diff --git a/src/freedreno/vulkan/tu_image.cc b/src/freedreno/vulkan/tu_image.cc
+index d04560491b0..5c73cc8d2ce 100644
+--- a/src/freedreno/vulkan/tu_image.cc
++++ b/src/freedreno/vulkan/tu_image.cc
+@@ -671,7 +671,15 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
+             ubwc_enabled = false;
+             force_linear_tile = true;
+          } else if (!mutable_ubwc_fc) {
+-            if (ubwc_enabled) {
++            /* Experimental (tu_mutable_ubwc / TU_MUTABLE_UBWC=1): without a
++             * format list, keep compression and trust the app to view the
++             * image only with formats of the same UBWC class. A view of
++             * another class reads garbage. Tiling is still decided below,
++             * and a linear image cannot keep UBWC.
++             */
++            bool keep_ubwc = !(fmt_list && fmt_list->viewFormatCount) &&
++                             device->instance->drirc.perf.mutable_ubwc;
++            if (ubwc_enabled && !keep_ubwc) {
+                if (fmt_list && fmt_list->viewFormatCount == 2) {
+                   perf_debug(
+                      device,
+-- 
+2.43.0
+

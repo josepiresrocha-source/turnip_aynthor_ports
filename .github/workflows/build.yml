@@ -1,4 +1,4 @@
-name: Build Turnip Thor Ports
+name: Build Turnip Thor
 
 on:
   workflow_dispatch:
@@ -10,10 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [thor, thor-safe]
+        variant: [thor, thor-eden-sysmem, thor-eden-nolrz]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
@@ -34,7 +34,7 @@ jobs:
           unzip -l dist/*.zip
           unzip -p dist/*.zip meta.json | python3 -m json.tool
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: Turnip-Thor-${{ matrix.variant }}
           path: dist/*.zip

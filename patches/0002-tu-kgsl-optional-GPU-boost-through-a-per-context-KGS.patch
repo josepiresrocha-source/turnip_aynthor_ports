@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 6 Nov 2026 13:45:34 -0400
-Subject: [PATCH 2/7] tu/kgsl: optional GPU boost through a per-context KGSL
+Subject: [PATCH 2/9] tu/kgsl: optional GPU boost through a per-context KGSL
  power constraint
 
 KGSL lets a context ask for a power level: with KGSL_CONTEXT_PWR_CONSTRAINT

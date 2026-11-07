@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 6 Nov 2026 13:44:54 -0400
-Subject: [PATCH 1/7] util/disk_cache: keep the shader cache in the app's cache
+Subject: [PATCH 1/9] util/disk_cache: keep the shader cache in the app's cache
  dir on Android
 
 On Android the on-disk shader cache is disabled by default, and even when

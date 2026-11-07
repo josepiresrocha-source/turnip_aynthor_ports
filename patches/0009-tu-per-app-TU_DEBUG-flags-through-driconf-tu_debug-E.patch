@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Turnip Thor <thor@localhost>
+Date: Sat, 7 Nov 2026 14:49:34 -0400
+Subject: [PATCH 9/9] tu: per-app TU_DEBUG flags through driconf (tu_debug),
+ Eden profile hook
+
+Android apps such as emulators cannot pass environment variables to the
+driver, so TU_DEBUG workarounds and diagnostics (sysmem, nolrz, ...) never
+reach them. A tu_debug string option adds TU_DEBUG flags for the matching
+application when the instance is created; on Android there is one Vulkan
+app per process, so the process-wide flags only affect that app.
+
+The yuzu-based emulator profile (applicationName "yuzu Emulator", Eden)
+sets nothing by default. Test builds fill the eden-debug marker to find
+the cause of a static ghost frame inside BotW shrines on Adreno 740.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KggzvL8zXAkzHKvMM3vhEZ
+---
+ src/freedreno/vulkan/00-turnip-defaults.conf | 14 ++++++++++++++
+ src/freedreno/vulkan/tu_device.cc            |  6 ++++++
+ src/freedreno/vulkan/tu_drirc_gen.py         |  5 ++++-
+ src/freedreno/vulkan/tu_util.cc              | 14 ++++++++++++++
+ src/freedreno/vulkan/tu_util.h               |  4 ++++
+ 5 files changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/src/freedreno/vulkan/00-turnip-defaults.conf b/src/freedreno/vulkan/00-turnip-defaults.conf
+index 0c1bb15d45c..22a076699fe 100644
+--- a/src/freedreno/vulkan/00-turnip-defaults.conf
++++ b/src/freedreno/vulkan/00-turnip-defaults.conf
+@@ -201,5 +201,19 @@
+             <option name="tu_allow_concurrent_binning" value="true" /> <!-- ports-cb -->
+             <option name="tu_assume_unswapped_mutable_views" value="true" /> <!-- ports-tiling -->
+         </application>
++        <!--
++            Eden and the other yuzu-based Switch emulators (applicationName
++            "yuzu Emulator"). Nothing changes by default. The thor-eden-*
++            test builds put TU_DEBUG flags here (the "eden-debug" marker):
++            sysmem renders every pass in system memory instead of GMEM tiles,
++            nolrz turns off the low-resolution Z pass. Used to find the cause
++            of the static "ghost frame" inside BotW shrines. Suspected: Eden
++            samples an image while it is still bound as a color target without
++            declaring a feedback loop, which in GMEM reads the stale copy in
++            memory (sysmem would fix it); an LRZ bug would show with nolrz.
++        -->
++        <application name="yuzu-based emulators (Eden)" application_name_match="^yuzu Emulator$">
++            <option name="tu_debug" value="" /> <!-- eden-debug -->
++        </application>
+     </device>
+ </driconf>
+diff --git a/src/freedreno/vulkan/tu_device.cc b/src/freedreno/vulkan/tu_device.cc
+index bff25e4f5ec..9074db00746 100644
+--- a/src/freedreno/vulkan/tu_device.cc
++++ b/src/freedreno/vulkan/tu_device.cc
+@@ -1960,6 +1960,12 @@ tu_init_dri_options(struct tu_instance *instance)
+ 
+    turnip_parse_dri_options(&instance->drirc, &params);
+ 
++   /* Per-app TU_DEBUG flags. One Vulkan app per process on Android, so
++    * adding them to the process-wide flags only affects that app.
++    */
++   if (instance->drirc.debug.tu_debug && *instance->drirc.debug.tu_debug)
++      tu_env_add_debug_flags(instance->drirc.debug.tu_debug);
++
+    if (TU_DEBUG(NO_CONCURRENT_BINNING))
+       instance->drirc.perf.allow_concurrent_binning = false;
+    if (TU_DEBUG(FORCE_CONCURRENT_BINNING))
+diff --git a/src/freedreno/vulkan/tu_drirc_gen.py b/src/freedreno/vulkan/tu_drirc_gen.py
+index 65172c463fa..8d97061c2d7 100644
+--- a/src/freedreno/vulkan/tu_drirc_gen.py
++++ b/src/freedreno/vulkan/tu_drirc_gen.py
+@@ -24,7 +24,10 @@ def declare_options():
+     debug_options = [
+         B("tu_dont_care_as_load", False,
+           "Treat VK_ATTACHMENT_LOAD_OP_DONT_CARE as LOAD_OP_LOAD, workaround on tiler GPUs for games that confuse these two load ops",
+-          c_name="dont_care_as_load")
++          c_name="dont_care_as_load"),
++        S("tu_debug", "",
++          "TU_DEBUG flags added for this application only, e.g. sysmem or nolrz. Android apps (emulators) cannot pass environment variables to the driver, so this is how a per-app workaround or diagnostic reaches them",
++          c_name="tu_debug"),
+     ]
+ 
+     perf_options = [
+diff --git a/src/freedreno/vulkan/tu_util.cc b/src/freedreno/vulkan/tu_util.cc
+index 76e4f4afedd..221c02ef367 100644
+--- a/src/freedreno/vulkan/tu_util.cc
++++ b/src/freedreno/vulkan/tu_util.cc
+@@ -176,6 +176,20 @@ tu_env_init(void)
+    call_once(&once, tu_env_init_once);
+ }
+ 
++void
++tu_env_add_debug_flags(const char *flags)
++{
++   uint64_t extra = parse_debug_string(flags, tu_debug_options);
++   if (!extra)
++      return;
++
++   tu_env.start_debug |= extra;
++   tu_env.debug.fetch_or(extra, std::memory_order_acq_rel);
++   if (TU_DEBUG(STARTUP))
++      mesa_logi("driconf tu_debug=\"%s\": TU_DEBUG=0x%" PRIx64, flags,
++                tu_env.debug.load());
++}
++
+ const char *
+ tu_env_debug_as_string(void)
+ {
+diff --git a/src/freedreno/vulkan/tu_util.h b/src/freedreno/vulkan/tu_util.h
+index c212db40e73..c00283d60a0 100644
+--- a/src/freedreno/vulkan/tu_util.h
++++ b/src/freedreno/vulkan/tu_util.h
+@@ -94,6 +94,10 @@ tu_env_init(void);
+ const char *
+ tu_env_debug_as_string(void);
+ 
++/* OR TU_DEBUG flags (same syntax as the variable) into tu_env, for driconf. */
++void
++tu_env_add_debug_flags(const char *flags);
++
+ /* Whenever we generate an error, pass it through this function. Useful for
+  * debugging, where we can break on it. Only call at error site, not when
+  * propagating errors. Might be useful to plug in a stack trace here.
+-- 
+2.43.0
+

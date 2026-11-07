@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Fri, 6 Nov 2026 22:32:19 -0400
-Subject: [PATCH 6/7] tu: opt-in tiling for 4-byte mutable images, enabled for
+Subject: [PATCH 6/9] tu: opt-in tiling for 4-byte mutable images, enabled for
  the port profiles
 
 Add tu_assume_unswapped_mutable_views (driconf, off by default). When the
