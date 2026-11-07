@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [ports, ports-cb]
+        variant: [thor, thor-safe]
 
     steps:
       - uses: actions/checkout@v4
