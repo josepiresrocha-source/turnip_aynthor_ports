@@ -1,0 +1,40 @@
+name: Build Turnip Thor Ports
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [ports, ports-sysmem, upstream]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build flex bison glslang-tools curl unzip zip git python3-pip pkg-config
+          pip3 install --break-system-packages meson mako pyyaml packaging
+
+      - name: Build ${{ matrix.variant }}
+        env:
+          VARIANT: ${{ matrix.variant }}
+          BUILD_VERSION: ${{ github.run_number }}
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Check zip
+        run: |
+          unzip -l dist/*.zip
+          unzip -p dist/*.zip meta.json | python3 -m json.tool
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Turnip-Thor-${{ matrix.variant }}
+          path: dist/*.zip
