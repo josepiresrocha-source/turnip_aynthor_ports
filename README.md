@@ -2,6 +2,24 @@
 
 Driver Vulkan Turnip (Mesa) montado para o **AYN Thor Max** (Snapdragon 8 Gen 2, **Adreno 740**, 16 GB, Android 13). Desde a v3 é um driver para **jogos e emuladores em geral**, com ajustes extras para os ports de console (Forza Horizon 2 Recompiled, Uncharted: The Nathan Drake Collection e outros baseados em Xenia e shadPS4).
 
+## Novidades da v7: teste dos riscos pretos no Banana Native
+
+Com a v6, o Ocarina of Time passou na verificação ("Memory map 2") e a memória do jogo foi mapeada nos endereços certos (`placed maps yes`). Mesmo assim, aparecem **riscos pretos largos quando a câmera se mexe**, com qualquer upscaler.
+
+O driver normal da v7 é igual à v6: o perfil do Banana Native (`nxnative`, o nome que ele informa ao driver) vem **vazio**. O que muda são os dois drivers de teste, que agora valem para o **Eden e o Banana Native** (e só para eles):
+
+| Zip | No Eden e no Banana Native |
+|---|---|
+| **Turnip Thor v7** | Nada muda (igual à v6) |
+| **Turnip Thor v7 Teste SYSMEM** | Desenha tudo direto na memória, sem os blocos internos da GPU (`sysmem`) |
+| **Turnip Thor v7 Teste NOLRZ** | Desliga o teste de profundidade antecipado (`nolrz`) |
+
+**Como testar:** no mesmo lugar e com o mesmo movimento de câmera, use o v7, o Teste SYSMEM, o Teste NOLRZ e o driver do sistema.
+- **Sumiu com o SYSMEM:** o problema é a memória de blocos do Turnip.
+- **Sumiu com o NOLRZ:** o problema é o LRZ.
+- **Continua com os três Turnips, mas não com o do sistema:** é outro recurso do Turnip.
+- **Continua também no driver do sistema:** o problema é do Banana Native, que trata o Ocarina como jogo em fase inicial.
+
 ## Novidades da v6: todas as extensões Vulkan à mostra (Banana Native)
 
 **O problema:** no Banana Native, a verificação de prontidão do Ocarina of Time reprovava o Turnip Thor ("Memory map 2" faltando), e o jogo ficava com a tela preta. O Turnip Gen8 V32 e o driver do sistema passavam.
@@ -175,9 +193,9 @@ Na v1, o modo sysmem não ajudou e o boost de GPU já está ligado. Se o FPS con
 
 | Zip | Conteúdo | Para quê |
 |---|---|---|
-| **Turnip Thor v6** | Os 9 patches, todas as extensões à mostra | **Use este** |
-| **Turnip Thor v6 Eden SYSMEM** | Os 9 patches; no Eden, tudo em `sysmem` | Teste do quadro fantasma (ver "Novidades da v5") |
-| **Turnip Thor v6 Eden NOLRZ** | Os 9 patches; no Eden, sem LRZ | Teste do quadro fantasma |
+| **Turnip Thor v7** | Os 10 patches, todas as extensões à mostra | **Use este** |
+| **Turnip Thor v7 Teste SYSMEM** | Os 10 patches; no Eden e no Banana Native, tudo em `sysmem` | Testes (ver "Novidades da v7" e "da v5") |
+| **Turnip Thor v7 Teste NOLRZ** | Os 10 patches; no Eden e no Banana Native, sem LRZ | Testes |
 
 O workflow gera esses três. O script ainda aceita `VARIANT=thor-safe`, `VARIANT=thor-nocb` e `VARIANT=upstream` (controle sem patches).
 

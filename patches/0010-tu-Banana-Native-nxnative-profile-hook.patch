@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Turnip Thor <thor@localhost>
+Date: Wed, 11 Nov 2026 14:56:37 -0400
+Subject: [PATCH] tu: Banana Native (nxnative) profile hook
+
+An empty profile for applicationName "nxnative" (Banana Native, the
+Switch 2 compatibility layer), with its own marker for the test builds,
+like the Eden one: sysmem or nolrz for that app only, to find where the
+black streaks in Ocarina of Time come from.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KggzvL8zXAkzHKvMM3vhEZ
+---
+ src/freedreno/vulkan/00-turnip-defaults.conf | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/freedreno/vulkan/00-turnip-defaults.conf b/src/freedreno/vulkan/00-turnip-defaults.conf
+index 22a076699fe..91813da9b4c 100644
+--- a/src/freedreno/vulkan/00-turnip-defaults.conf
++++ b/src/freedreno/vulkan/00-turnip-defaults.conf
+@@ -215,5 +215,15 @@
+         <application name="yuzu-based emulators (Eden)" application_name_match="^yuzu Emulator$">
+             <option name="tu_debug" value="" /> <!-- eden-debug -->
+         </application>
++        <!--
++            Banana Native / nxnative, the Switch 2 compatibility layer
++            (applicationName "nxnative"). Nothing changes by default; the
++            thor-test-* builds fill the "nxnative-debug" marker the same way,
++            to tell whether the wide black streaks Ocarina of Time shows while
++            the camera moves come from GMEM (sysmem) or LRZ (nolrz).
++        -->
++        <application name="Banana Native (nxnative)" application_name_match="^nxnative$">
++            <option name="tu_debug" value="" /> <!-- nxnative-debug -->
++        </application>
+     </device>
+ </driconf>
+-- 
+2.43.0
+

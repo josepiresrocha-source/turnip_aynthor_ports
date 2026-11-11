@@ -9,13 +9,13 @@
 #     - driconf profiles for Xenia- and shadPS4-based ports (autotune profiled, concurrent binning,
 #       A2C emulation for Xenia, opt-in tiling for 4-byte mutable images)
 #     - experimental UBWC for mutable images (off; TU_MUTABLE_UBWC=1 in the app's environment)
-#     - per-app TU_DEBUG flags through driconf (tu_debug), with an Eden/yuzu profile hook
+#     - per-app TU_DEBUG flags through driconf (tu_debug), with Eden/yuzu and Banana Native hooks
 #
 # Usage:  VARIANT=thor          ./build.sh   (default: everything above)
 #         VARIANT=thor-safe     ./build.sh   (same, without the opt-in 4-byte tiling in the port profiles)
 #         VARIANT=thor-nocb     ./build.sh   (same as thor, without concurrent binning in the port profiles)
-#         VARIANT=thor-eden-sysmem ./build.sh (test: Eden/yuzu renders every pass in system memory)
-#         VARIANT=thor-eden-nolrz  ./build.sh (test: Eden/yuzu without LRZ)
+#         VARIANT=thor-test-sysmem ./build.sh (test: Eden/yuzu and Banana Native render every pass in system memory)
+#         VARIANT=thor-test-nolrz  ./build.sh (test: Eden/yuzu and Banana Native without LRZ)
 #         VARIANT=upstream      ./build.sh   (Mesa main without patches: the control for A/B tests)
 #
 # All variants use the same compiler flags, so an A/B between them measures only the patches.
@@ -49,8 +49,8 @@ log() { echo -e "\033[0;32m$*\033[0m"; }
 die() { echo -e "\033[0;31m$*\033[0m" >&2; exit 1; }
 
 case "$VARIANT" in
-    thor|thor-safe|thor-nocb|thor-eden-sysmem|thor-eden-nolrz|upstream) ;;
-    *) die "VARIANT must be thor, thor-safe, thor-nocb, thor-eden-sysmem, thor-eden-nolrz or upstream (got '$VARIANT')" ;;
+    thor|thor-safe|thor-nocb|thor-test-sysmem|thor-test-nolrz|upstream) ;;
+    *) die "VARIANT must be thor, thor-safe, thor-nocb, thor-test-sysmem, thor-test-nolrz or upstream (got '$VARIANT')" ;;
 esac
 
 check_deps() {
@@ -105,11 +105,13 @@ apply_patches() {
     if [ "$VARIANT" = thor-nocb ]; then
         sed -i 's|value="true" /> <!-- ports-cb -->|value="false" /> <!-- ports-cb -->|' "$conf"
     fi
+    # Test builds: the same TU_DEBUG flags for Eden/yuzu and for Banana Native (nxnative) only.
     local eden=""
-    [ "$VARIANT" = thor-eden-sysmem ] && eden=sysmem
-    [ "$VARIANT" = thor-eden-nolrz ] && eden=nolrz
+    [ "$VARIANT" = thor-test-sysmem ] && eden=sysmem
+    [ "$VARIANT" = thor-test-nolrz ] && eden=nolrz
     if [ -n "$eden" ]; then
-        sed -i "s|value=\"\" /> <!-- eden-debug -->|value=\"$eden\" /> <!-- eden-debug -->|" "$conf"
+        sed -i -e "s|value=\"\" /> <!-- eden-debug -->|value=\"$eden\" /> <!-- eden-debug -->|" \
+               -e "s|value=\"\" /> <!-- nxnative-debug -->|value=\"$eden\" /> <!-- nxnative-debug -->|" "$conf"
     fi
 
     # Guard rails: fail instead of shipping a driver without what its name promises.
@@ -125,6 +127,8 @@ apply_patches() {
     grep -q "tu_env_add_debug_flags" src/freedreno/vulkan/tu_util.cc || die "per-app TU_DEBUG patch missing"
     [ "$(grep -c "value=\"$eden\" /> <!-- eden-debug -->" "$conf")" = 1 ] ||
         die "Eden profile does not set tu_debug to '$eden'"
+    [ "$(grep -c "value=\"$eden\" /> <!-- nxnative-debug -->" "$conf")" = 1 ] ||
+        die "Banana Native profile does not set tu_debug to '$eden'"
     [ "$(grep -c 'value="profiled" /> <!-- ports-autotune -->' "$conf")" = 2 ] ||
         die "port profiles do not use autotune 'profiled'"
     local cb=true tiling=true
@@ -193,25 +197,25 @@ package() {
     local name desc suffix
     case "$VARIANT" in
         thor)
-            name="Turnip Thor v6"
-            desc="AYN Thor/A740 v6: Mesa main 21bbed37 + shader cache, GPU+L3 boost, mutable tiling, port profiles, TU_MUTABLE_UBWC switch, per-app TU_DEBUG, all extensions advertised"
-            suffix="v6" ;;
+            name="Turnip Thor v7"
+            desc="AYN Thor/A740 v7: Mesa main 21bbed37 + shader cache, GPU+L3 boost, mutable tiling, port profiles, TU_MUTABLE_UBWC switch, per-app TU_DEBUG, all extensions advertised"
+            suffix="v7" ;;
         thor-safe)
-            name="Turnip Thor v6 Safe"
-            desc="AYN Thor/A740 v6 without the opt-in 4-byte mutable tiling in the port profiles"
-            suffix="v6-Safe" ;;
+            name="Turnip Thor v7 Safe"
+            desc="AYN Thor/A740 v7 without the opt-in 4-byte mutable tiling in the port profiles"
+            suffix="v7-Safe" ;;
         thor-nocb)
-            name="Turnip Thor v6 NoCB"
-            desc="AYN Thor/A740 v6 without concurrent binning in the port profiles"
-            suffix="v6-NoCB" ;;
-        thor-eden-sysmem)
-            name="Turnip Thor v6 Eden SYSMEM"
-            desc="AYN Thor/A740 v6, test build: Eden/yuzu renders every pass in system memory (TU_DEBUG=sysmem for that app only)"
-            suffix="v6-Eden-SYSMEM" ;;
-        thor-eden-nolrz)
-            name="Turnip Thor v6 Eden NOLRZ"
-            desc="AYN Thor/A740 v6, test build: Eden/yuzu without LRZ (TU_DEBUG=nolrz for that app only)"
-            suffix="v6-Eden-NOLRZ" ;;
+            name="Turnip Thor v7 NoCB"
+            desc="AYN Thor/A740 v7 without concurrent binning in the port profiles"
+            suffix="v7-NoCB" ;;
+        thor-test-sysmem)
+            name="Turnip Thor v7 Teste SYSMEM"
+            desc="AYN Thor/A740 v7, test build: Eden/yuzu and Banana Native render every pass in system memory (TU_DEBUG=sysmem for those apps only)"
+            suffix="v7-Teste-SYSMEM" ;;
+        thor-test-nolrz)
+            name="Turnip Thor v7 Teste NOLRZ"
+            desc="AYN Thor/A740 v7, test build: Eden/yuzu and Banana Native without LRZ (TU_DEBUG=nolrz for those apps only)"
+            suffix="v7-Teste-NOLRZ" ;;
         upstream)
             name="Turnip Thor Upstream"
             desc="AYN Thor/A740: Mesa main 21bbed37 without patches (control for A/B tests)"

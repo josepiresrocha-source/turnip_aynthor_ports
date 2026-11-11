@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [thor, thor-eden-sysmem, thor-eden-nolrz]
+        variant: [thor, thor-test-sysmem, thor-test-nolrz]
 
     steps:
       - uses: actions/checkout@v5
