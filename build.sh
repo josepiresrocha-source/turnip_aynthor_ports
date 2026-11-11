@@ -32,6 +32,14 @@ BUILD_VERSION="${BUILD_VERSION:-1}"
 # The Thor ships Android 13. Building against a newer API level can reference libc symbols that
 # Android 13 does not have, and the driver would fail to load.
 API=33
+# Mesa's android-strict (on by default) hides every VK_KHR_* extension that Android's CTS did not
+# allow at the API level above: at 33 that is 27 extensions Turnip has, among them
+# VK_KHR_map_memory2 (Banana Native needs it for placed memory maps: without it the game draws
+# nothing), maintenance5-9, vertex_attribute_divisor, index_type_uint8, line_rasterization,
+# load_store_op_none, robustness2, dynamic_rendering_local_read and swapchain_maintenance1.
+# Apps on Android 13 get a Vulkan 1.3 loader, so they reach those features only through the
+# extensions. Off: every extension the driver implements is advertised.
+ANDROID_STRICT=false
 # Snapdragon 8 Gen 2: Cortex-X3 + A715/A710 + A510, all ARMv9.0. armv8.2-a (a subset every core
 # has) gives inline LSE atomics instead of LL/SC loops; tuned for the A715/A710 cores where the
 # render threads run. Not for older phones.
@@ -161,6 +169,7 @@ EOF
         -Db_lto=false \
         -Dplatforms=android \
         -Dplatform-sdk-version=$API \
+        -Dandroid-strict=$ANDROID_STRICT \
         -Dandroid-stub=true \
         -Dandroid-libbacktrace=disabled \
         -Dgallium-drivers= \
@@ -170,6 +179,11 @@ EOF
         -Dvideo-codecs= \
         -Degl=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Dglx=disabled \
         -Dllvm=disabled -Dvalgrind=disabled
+    # Guard rails: the right API level, and no extension filter.
+    grep -q -- "-DANDROID_API_LEVEL=$API" build-android/build.ninja || die "ANDROID_API_LEVEL is not $API"
+    if grep -q -- "-DANDROID_STRICT" build-android/build.ninja; then
+        die "android-strict is still on: VK_KHR_map_memory2 and 26 other extensions would be hidden"
+    fi
     ninja -C build-android src/freedreno/vulkan/libvulkan_freedreno.so
     mkdir -p "$OUT"
     cp build-android/src/freedreno/vulkan/libvulkan_freedreno.so "$OUT/"
@@ -179,25 +193,25 @@ package() {
     local name desc suffix
     case "$VARIANT" in
         thor)
-            name="Turnip Thor v5"
-            desc="AYN Thor/A740 v5: Mesa main 21bbed37 + shader cache, GPU+L3 boost, mutable tiling, port profiles, TU_MUTABLE_UBWC switch, per-app TU_DEBUG"
-            suffix="v5" ;;
+            name="Turnip Thor v6"
+            desc="AYN Thor/A740 v6: Mesa main 21bbed37 + shader cache, GPU+L3 boost, mutable tiling, port profiles, TU_MUTABLE_UBWC switch, per-app TU_DEBUG, all extensions advertised"
+            suffix="v6" ;;
         thor-safe)
-            name="Turnip Thor v5 Safe"
-            desc="AYN Thor/A740 v5 without the opt-in 4-byte mutable tiling in the port profiles"
-            suffix="v5-Safe" ;;
+            name="Turnip Thor v6 Safe"
+            desc="AYN Thor/A740 v6 without the opt-in 4-byte mutable tiling in the port profiles"
+            suffix="v6-Safe" ;;
         thor-nocb)
-            name="Turnip Thor v5 NoCB"
-            desc="AYN Thor/A740 v5 without concurrent binning in the port profiles"
-            suffix="v5-NoCB" ;;
+            name="Turnip Thor v6 NoCB"
+            desc="AYN Thor/A740 v6 without concurrent binning in the port profiles"
+            suffix="v6-NoCB" ;;
         thor-eden-sysmem)
-            name="Turnip Thor v5 Eden SYSMEM"
-            desc="AYN Thor/A740 v5, test build: Eden/yuzu renders every pass in system memory (TU_DEBUG=sysmem for that app only)"
-            suffix="v5-Eden-SYSMEM" ;;
+            name="Turnip Thor v6 Eden SYSMEM"
+            desc="AYN Thor/A740 v6, test build: Eden/yuzu renders every pass in system memory (TU_DEBUG=sysmem for that app only)"
+            suffix="v6-Eden-SYSMEM" ;;
         thor-eden-nolrz)
-            name="Turnip Thor v5 Eden NOLRZ"
-            desc="AYN Thor/A740 v5, test build: Eden/yuzu without LRZ (TU_DEBUG=nolrz for that app only)"
-            suffix="v5-Eden-NOLRZ" ;;
+            name="Turnip Thor v6 Eden NOLRZ"
+            desc="AYN Thor/A740 v6, test build: Eden/yuzu without LRZ (TU_DEBUG=nolrz for that app only)"
+            suffix="v6-Eden-NOLRZ" ;;
         upstream)
             name="Turnip Thor Upstream"
             desc="AYN Thor/A740: Mesa main 21bbed37 without patches (control for A/B tests)"

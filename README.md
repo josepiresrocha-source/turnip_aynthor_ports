@@ -2,6 +2,20 @@
 
 Driver Vulkan Turnip (Mesa) montado para o **AYN Thor Max** (Snapdragon 8 Gen 2, **Adreno 740**, 16 GB, Android 13). Desde a v3 é um driver para **jogos e emuladores em geral**, com ajustes extras para os ports de console (Forza Horizon 2 Recompiled, Uncharted: The Nathan Drake Collection e outros baseados em Xenia e shadPS4).
 
+## Novidades da v6: todas as extensões Vulkan à mostra (Banana Native)
+
+**O problema:** no Banana Native, a verificação de prontidão do Ocarina of Time reprovava o Turnip Thor ("Memory map 2" faltando), e o jogo ficava com a tela preta. O Turnip Gen8 V32 e o driver do sistema passavam.
+
+**A causa:** o Mesa, quando compilado para Android, tem um filtro (`android-strict`, ligado por padrão). Ele esconde as extensões `VK_KHR_*` que o teste de conformidade do Android ainda não liberava na versão de Android informada na compilação. O Turnip Thor é compilado para o Android 13 (API 33), para carregar no Thor. Com isso, **27 extensões que o driver tem ficavam escondidas**:
+- `VK_KHR_map_memory2`, que o Banana Native exige para colocar a memória do jogo nos endereços certos;
+- `maintenance5` a `maintenance9`, `vertex_attribute_divisor`, `index_type_uint8`, `line_rasterization`, `load_store_op_none`, `robustness2`, `dynamic_rendering_local_read`, `swapchain_maintenance1` e outras.
+
+No Android 13 os apps só chegam a esses recursos pelas extensões, porque o carregador Vulkan do sistema é 1.3. O Gen8 V32 passava porque é compilado como Android 16 (API 36), e nessa versão a lista libera mais extensões.
+
+**A correção:** a v6 continua compilada para o Android 13, mas com o filtro desligado (`-Dandroid-strict=false`). O driver mostra tudo o que implementa. O código do driver não mudou, só essa opção de compilação. O build agora falha se o filtro voltar a ligar.
+
+**O que isso não resolve no Ocarina:** a folhagem e algumas portas usam *mesh shaders* (`VK_EXT_mesh_shader`), que o Turnip oficial não tem. O Banana Native pula esses desenhos em todos os Turnips, inclusive no V32.
+
 ## Novidades da v5: teste do "quadro fantasma" no Eden
 
 **O problema:** no Zelda: Breath of the Wild, pelo Eden, dentro dos santuários aparece um quadro escuro, como uma sombra, parado na tela enquanto a câmera se mexe. Acontece com o Turnip (há relatos com várias versões) e não com o driver da Qualcomm.
@@ -161,9 +175,9 @@ Na v1, o modo sysmem não ajudou e o boost de GPU já está ligado. Se o FPS con
 
 | Zip | Conteúdo | Para quê |
 |---|---|---|
-| **Turnip Thor v5** | Os 9 patches | **Use este** |
-| **Turnip Thor v5 Eden SYSMEM** | Os 9 patches; no Eden, tudo em `sysmem` | Teste do quadro fantasma (ver "Novidades da v5") |
-| **Turnip Thor v5 Eden NOLRZ** | Os 9 patches; no Eden, sem LRZ | Teste do quadro fantasma |
+| **Turnip Thor v6** | Os 9 patches, todas as extensões à mostra | **Use este** |
+| **Turnip Thor v6 Eden SYSMEM** | Os 9 patches; no Eden, tudo em `sysmem` | Teste do quadro fantasma (ver "Novidades da v5") |
+| **Turnip Thor v6 Eden NOLRZ** | Os 9 patches; no Eden, sem LRZ | Teste do quadro fantasma |
 
 O workflow gera esses três. O script ainda aceita `VARIANT=thor-safe`, `VARIANT=thor-nocb` e `VARIANT=upstream` (controle sem patches).
 
